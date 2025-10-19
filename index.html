@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+<title>Magic Dice — Production (Haptic)</title>
+<meta name="theme-color" content="#000000" />
+<link rel="manifest" href="manifest.json">
+
+<style>
+  :root{
+    --bg:#000;
+    --dice-bg:#fff;
+    --dice-size:36vmin;
+    --shadow: 0 20px 40px rgba(0,0,0,0.6);
+  }
+  html,body{height:100%;margin:0;background:var(--bg);-webkit-user-select:none;user-select:none;touch-action:none;}
+  .stage{position:relative;width:100%;height:100%;display:flex;align-items:center;justify-content:center;flex-direction:column;}
+  .dice-wrap{width:var(--dice-size);height:var(--dice-size);border-radius:14%;background:var(--dice-bg);display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow);transition: transform 0.45s cubic-bezier(.22,.9,.32,1), box-shadow 0.3s;will-change:transform;touch-action:none;}
+  .dice-face{font-size:calc(var(--dice-size)*0.42);line-height:1;user-select:none}
+  .hint{position:absolute;bottom:22px;width:100%;text-align:center;color:#aaa;font-family:Inter,system-ui,Arial;font-size:13px;letter-spacing:.6px;}
+  .popup-backdrop{position:fixed;inset:0;display:none;background:rgba(0,0,0,0.6);align-items:center;justify-content:center;z-index:50}
+  .popup{background:#111;padding:18px;border-radius:12px;color:#fff;min-width:250px;text-align:center;box-shadow:0 10px 30px rgba(0,0,0,0.7)}
+  .popup h3{margin:0 0 8px;font-weight:600}
+  .num-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px}
+  .num-btn{background:#fff;color:#000;border-radius:8px;padding:12px 6px;font-size:18px;border:0;cursor:pointer;box-shadow:0 6px 12px rgba(0,0,0,0.3)}
+  .dev-overlay{position:fixed;right:8px;top:8px;background:rgba(255,255,255,0.06);color:#fff;padding:6px 10px;border-radius:8px;font-size:12px;z-index:80;display:none}
+</style>
+</head>
+<body>
+  <div class="stage" id="stage">
+    <div class="dice-wrap" id="diceWrap" aria-hidden="true" role="img" title="Dice">
+      <div class="dice-face" id="diceFace">⚀</div>
+    </div>
+
+    <div class="hint">Swipe to roll • Tap ×5 anywhere to pick a secret number • Hold 3s to activate</div>
+
+    <div class="popup-backdrop" id="popupBackdrop">
+      <div class="popup" id="popup">
+        <h3>Choose a number (1-6)</h3>
+        <div class="num-grid">
+          <button class="num-btn" data-n="1">1</button>
+          <button class="num-btn" data-n="2">2</button>
+          <button class="num-btn" data-n="3">3</button>
+          <button class="num-btn" data-n="4">4</button>
+          <button class="num-btn" data-n="5">5</button>
+          <button class="num-btn" data-n="6">6</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="dev-overlay" id="devOverlay" style="display:none"></div>
+  </div>
+
+<script>
+(function(){
+  // CONFIG -----------------------------------------------------------------
+  const LONG_PRESS_MS = 3000;
+  const MULTITAP_WINDOW = 600;
+  const MULTITAP_COUNT = 5;
+  const SWIPE_MIN_DISTANCE = 20;
+  const THROW_FORCE_MULT = 1.0;
+  const SPIN_DURATION = 900;
+  const BOUNCE_DURATION = 220;
+  const DEV_SHOW = false;
+
+  // HAPTIC CONFIG (A) -----------------------------------------------------
+  // Set to true to enable short vibration on activation (magician-only)
+  const ENABLE_HAPTIC = true;
+  // Vibration pattern (ms): short pulses that are subtle
+  // Example: [30, 30, 30] => vibrate 30ms, pause 30ms, vibrate 30ms
+  const HAPTIC_PATTERN = [30, 40, 30];
+
+  // DOM -------------------------------------------------------------------
+  const diceWrap = document.getElementById('diceWrap');
+  const diceFace = document.getElementById('diceFace');
+  const popupBackdrop = document.getElementById('popupBackdrop');
+  const numButtons = document.querySelectorAll('.num-btn');
+  const devOverlay = document.getElementById('devOverlay');
+
+  // State -----------------------------------------------------------------
+  const faces = ["⚀","⚁","⚂","⚃","⚄","⚅"];
+  let candidateNumber = 0;
+  let forcedNumber = 0;
+  let forceNext = false;
+  let lastTapTime = 0;
+  let tapCount = 0;
+  let touchStart = null;
+  let holdTimer = null;
+  let isAnimating = false;
+
+  // Utility: haptic vibrate safely
+  function doHaptic(){
+    if(!ENABLE_HAPTIC) return;
+    if('vibrate' in navigator){
+      try{
+        navigator.vibrate(HAPTIC_PATTERN);
+      }catch(e){
+        // ignore
+      }
+    }
+  }
+
+  // Display ----------------------------------------------------------------
+  function showFace(n){
+    diceFace.textContent = faces[n-1];
+  }
+
+  function animateRoll(finalNumber, velocity){
+    if(isAnimating) return;
+    isAnimating = true;
+    const total = SPIN_DURATION;
+    const start = performance.now();
+    const initialRotation = (Math.random()*360)|0;
+    const spinRevs = 2 + Math.min(6, Math.max(1, Math.floor((velocity||1)*3)));
+    const finalRot = initialRotation + spinRevs*360 + (Math.random()*40 - 20);
+
+    const spinTick = (time) => {
+      const t = Math.min(1, (time - start) / total);
+      const eased = 1 - Math.pow(1 - t, 3);
+      if(t < 0.85){
+        if(Math.random() < 0.35) {
+          const rnd = (Math.random()*6|0)+1; showFace(rnd);
+        }
+      } else {
+        showFace(finalNumber);
+      }
+      const currentRot = initialRotation + (finalRot - initialRotation) * eased;
+      diceWrap.style.transform = `translate(-50%, -50%) rotate(${currentRot}deg) scale(${1 - 0.02*eased})`;
+      if(t < 1) requestAnimationFrame(spinTick);
+      else {
+        diceWrap.style.transition = `transform ${BOUNCE_DURATION}ms cubic-bezier(.2,.9,.3,1)`;
+        diceWrap.style.transform = `translate(-50%, -50%) rotate(${finalRot}deg) scale(1.03)`;
+        setTimeout(()=>{
+          diceWrap.style.transform = `translate(-50%, -50%) rotate(${finalRot}deg) scale(1)`;
+          setTimeout(()=> {
+            diceWrap.style.transition = '';
+            isAnimating = false;
+            if(forceNext){
+              forceNext = false; forcedNumber = 0; candidateNumber = 0;
+            }
+          }, 120);
+        }, BOUNCE_DURATION);
+      }
+    };
+    requestAnimationFrame(spinTick);
+  }
+
+  function performRoll(velocity){
+    if(forceNext && forcedNumber >= 1 && forcedNumber <= 6){
+      animateRoll(forcedNumber, velocity);
+    } else {
+      const n = (Math.random()*6|0) + 1;
+      animateRoll(n, velocity);
+    }
+  }
+
+  // Input handling --------------------------------------------------------
+  function getPoint(evt){
+    if(evt.changedTouches && evt.changedTouches.length) {
+      const t = evt.changedTouches[0];
+      return {x:t.clientX, y:t.clientY, t:evt.timeStamp};
+    } else {
+      return {x: evt.clientX, y: evt.clientY, t:evt.timeStamp};
+    }
+  }
+
+  function onStart(evt){
+    if(isAnimating) return;
+    const p = getPoint(evt);
+    touchStart = p;
+    const now = Date.now();
+    tapCount = (now - lastTapTime < MULTITAP_WINDOW) ? tapCount + 1 : 1;
+    lastTapTime = now;
+    if(tapCount >= MULTITAP_COUNT){
+      openPopup();
+      tapCount = 0;
+    }
+    clearTimeout(holdTimer);
+    holdTimer = setTimeout(()=> {
+      if(candidateNumber >=1 && candidateNumber <=6) {
+        forcedNumber = candidateNumber;
+        forceNext = true;
+        // HAPTIC: magician-only subtle vibrate on activation
+        doHaptic();
+        // No visible or audible confirmation (keeps trick secret)
+      }
+    }, LONG_PRESS_MS);
+  }
+
+  function onEnd(evt){
+    clearTimeout(holdTimer);
+    if(!touchStart) return;
+    const p = getPoint(evt);
+    const dx = p.x - touchStart.x;
+    const dy = p.y - touchStart.y;
+    const dist = Math.hypot(dx,dy);
+    const dt = Math.max(8, p.t - touchStart.t);
+    touchStart = null;
+
+    if(dist < SWIPE_MIN_DISTANCE) {
+      performRoll(0.6);
+      return;
+    }
+    const velocity = Math.min(4, dist / dt * THROW_FORCE_MULT * 20);
+    performRoll(velocity);
+  }
+
+  // Attach handlers (touch + mouse)
+  diceWrap.addEventListener('touchstart', onStart, {passive:true});
+  diceWrap.addEventListener('touchend', onEnd, {passive:true});
+  document.body.addEventListener('touchstart', onStart, {passive:true});
+  document.body.addEventListener('touchend', onEnd, {passive:true});
+  document.body.addEventListener('mousedown', onStart);
+  document.body.addEventListener('mouseup', onEnd);
+
+  // Popup logic -----------------------------------------------------------
+  function openPopup(){
+    popupBackdrop.style.display = 'flex';
+    popupBackdrop.style.alignItems = 'center';
+    popupBackdrop.style.justifyContent = 'center';
+  }
+  function closePopup(){
+    popupBackdrop.style.display = 'none';
+  }
+  numButtons.forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const n = parseInt(btn.dataset.n,10);
+      if(!isNaN(n) && n>=1 && n<=6){
+        candidateNumber = n;
+        closePopup();
+        // optional small confirmation for magician only (alert) - you can remove in performance
+        setTimeout(()=> {
+          // keep short and private; comment out if you want zero feedback
+          // alert('Candidate selected: ' + n + '\nNow LONG-PRESS (3s) anywhere to ACTIVATE before handing phone.');
+        }, 30);
+      }
+    });
+  });
+
+  // Dev overlay
+  function updateDev(){
+    if(!DEV_SHOW) return;
+    devOverlay.style.display='block';
+    devOverlay.textContent = `cand:${candidateNumber} forced:${forcedNumber} flag:${forceNext}`;
+  }
+  setInterval(updateDev, 300);
+
+  // initial face
+  showFace( (Math.random()*6|0)+1 );
+
+  // keyboard support for testing
+  window.addEventListener('keydown', (e)=>{
+    if(e.key === ' '){
+      performRoll(1.2);
+    }
+  });
+
+  // Expose API for magician (console)
+  window.__magicDice = {
+    pick(n){ candidateNumber = n; return 'candidate set '+n; },
+    activate(){ if(candidateNumber){ forcedNumber=candidateNumber; forceNext=true; doHaptic(); return 'activated '+candidateNumber;} return 'no candidate'; },
+    clear(){ candidateNumber=0; forcedNumber=0; forceNext=false; return 'cleared'; },
+    state(){ return {candidateNumber, forcedNumber, forceNext}; }
+  };
+
+})();
+</script>
+</body>
+</html>
